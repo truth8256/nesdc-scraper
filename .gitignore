@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Data and Cache
+data/raw/
+data/pdfplumber_output/
+hf_cache/
+.github/workflows/daily_update.yml
+
+# Logs and intermediate files
+*.log
+*.png
+*.jpg
+*.jpeg
+archive/
+debug/
+
+# OS
+.DS_Store
+Thumbs.db
