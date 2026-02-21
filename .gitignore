@@ -3,13 +3,23 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+.venv/
 .env
+*.pyc
 
 # Data and Cache
 data/raw/
 data/pdfplumber_output/
+data/parsed_tables/
 hf_cache/
 .github/workflows/daily_update.yml
+
+# Generated files
+page_index.csv
+page_index_test.csv
+parser_comparison_results.json
+parser_comparison_checkpoint.json
+*_checkpoint.json
 
 # Logs and intermediate files
 *.log
@@ -18,7 +28,16 @@ hf_cache/
 *.jpeg
 archive/
 debug/
+comparison.log
+nohup.out
 
-# OS
+# OS and IDE
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+.claude/
+
+# Temporary test files
+test_*.py
+*_test.py

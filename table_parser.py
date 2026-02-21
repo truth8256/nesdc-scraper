@@ -21,16 +21,50 @@ os.symlink = symlink_patch
 
 # --- Environment Setup for Docling/HF ---
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
-# Ensure cache directory exists
-cache_dir = r"d:\working\polldata\nesdc_scraper\hf_cache"
-if not os.path.exists(cache_dir):
-    os.makedirs(cache_dir, exist_ok=True)
-os.environ["HF_HOME"] = cache_dir
+# Use default HF cache (don't override HF_HOME)
+# This allows Docling to find its downloaded models
 
 from docling.document_converter import DocumentConverter
 from validator import validate_table
 from llm_extractor import extract_table_from_markdown
+from schema import convert_flat_to_standard, validate_schema
 
+
+
+def extract_question_from_markdown(md_text):
+    """
+    Markdown 텍스트에서 질문 추출.
+
+    Parameters
+    ----------
+    md_text : str
+        Docling이 변환한 markdown 텍스트
+
+    Returns
+    -------
+    str  질문 텍스트 (없으면 빈 문자열)
+    """
+    import re
+
+    # "Q숫자.", "SQ숫자.", "문 숫자." 등으로 시작하는 줄 찾기
+    lines = md_text.split('\n')
+    question_pattern = re.compile(r'^(Q\d+\.|SQ\d+\.|문\s*\d+\.)')
+
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if question_pattern.match(line):
+            # 여러 줄에 걸쳐 있을 수 있으므로 다음 줄도 포함
+            question = line
+            for j in range(i + 1, min(i + 5, len(lines))):
+                next_line = lines[j].strip()
+                # 새로운 질문이나 테이블 시작 패턴이 나오면 중단
+                if question_pattern.match(next_line) or next_line.startswith('|') or next_line.startswith('#'):
+                    break
+                if next_line:
+                    question += " " + next_line
+            return question.strip()
+
+    return ""
 
 
 def get_target_pdf(dir_path):
@@ -153,7 +187,9 @@ def parse_survey_table(folder_name, page_numbers, force_llm=False):
     Extract tables from specific pages of the largest PDF in the folder.
     Optimized to convert only the requested pages.
     """
-    base_dir = r"d:\working\polldata\nesdc_scraper\data\raw"
+    # 현재 스크립트 디렉토리 기준 상대 경로
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.join(script_dir, "data", "raw")
     dir_path = os.path.join(base_dir, str(folder_name))
     
     target_pdf = get_target_pdf(dir_path)
@@ -178,10 +214,16 @@ def parse_survey_table(folder_name, page_numbers, force_llm=False):
             try:
                 result = converter.convert(target_pdf, page_range=(p, p))
                 doc = result.document
-                
+
+                # --- Extract question from markdown ---
+                md_text = doc.export_to_markdown()
+                question_text = extract_question_from_markdown(md_text)
+                if question_text:
+                    print(f"  - Question: {question_text[:80]}...")
+
                 # --- 1. Docling Extraction & Validation ---
                 docling_candidates = []
-                
+
                 for table in doc.tables:
                     # Validate provenance if available
                     if table.prov:
@@ -262,36 +304,75 @@ def parse_survey_table(folder_name, page_numbers, force_llm=False):
 
                          # Validation DataFrame
                          val_df = pd.DataFrame(flat_data)
-                         
+
                          # Basic cleanup for LLM output (ensure consistency)
                          llm_report = validate_table(val_df, {'page': p})
                          print(f"  - LLM Extraction Result: {llm_report['validity']} ({llm_report.get('row_validity_rate', 0):.1f}%)")
-                         
-                         extracted_tables.append({
-                             "page": p,
-                             "question": question_text,
-                             "data": llm_data_list, # Save original nested structure
-                             "columns": list(llm_data_list[0].keys()) if llm_data_list else [],
-                             "method": "llm_openai"
-                         })
+
+                         # Convert to standard schema
+                         # LLM already has nested structure, so convert from flat
+                         standard_table = convert_flat_to_standard(
+                             flat_data,
+                             poll_id=str(folder_name),
+                             page=p,
+                             keyword="",
+                             question=question_text if question_text else llm_result.get('question', ''),
+                             method="llm_gemini_v1.0"
+                         )
+
+                         # Schema validation
+                         schema_issues = validate_schema(standard_table)
+                         if schema_issues:
+                             print(f"  - Schema validation warnings:")
+                             for issue in schema_issues[:3]:
+                                 print(f"    • {issue}")
+
+                         extracted_tables.append(standard_table)
                     else:
                          print("  - LLM failed to extract meaningful data.")
                          # Fallback to Docling result if it existed, just to save something
                          if docling_candidates:
                              print("  - Reverting to low-quality Docling output.")
                              for c in docling_candidates:
-                                 del c['score']
-                                 del c['status']
-                                 del c['df']
-                                 extracted_tables.append(c)
+                                 df = c['df']
+                                 flat_data = df.to_dict(orient='records')
+
+                                 # Convert to standard schema
+                                 standard_table = convert_flat_to_standard(
+                                     flat_data,
+                                     poll_id=str(folder_name),
+                                     page=p,
+                                     keyword="",
+                                     question=question_text,
+                                     method="docling_v1.0_fallback"
+                                 )
+
+                                 extracted_tables.append(standard_table)
 
                 else:
-                    # Use Docling results
+                    # Use Docling results - Convert to standard schema
                     for c in docling_candidates:
-                        del c['score']
-                        del c['status']
-                        del c['df']
-                        extracted_tables.append(c)
+                        df = c['df']
+                        flat_data = df.to_dict(orient='records')
+
+                        # Convert to standard schema
+                        standard_table = convert_flat_to_standard(
+                            flat_data,
+                            poll_id=str(folder_name),
+                            page=p,
+                            keyword="",  # 자동 추론은 Phase 3에서 구현
+                            question=question_text,
+                            method="docling_v1.0"
+                        )
+
+                        # Schema validation
+                        schema_issues = validate_schema(standard_table)
+                        if schema_issues:
+                            print(f"  - Schema validation warnings:")
+                            for issue in schema_issues[:3]:
+                                print(f"    • {issue}")
+
+                        extracted_tables.append(standard_table)
                     
             except Exception as e:
                 print(f"  - Error processing page {p}: {e}")
@@ -299,14 +380,16 @@ def parse_survey_table(folder_name, page_numbers, force_llm=False):
                 traceback.print_exc()
 
         # Save output
-        output_dir = r"d:\working\polldata\nesdc_scraper\data\parsed_tables"
+        output_dir = os.path.join(script_dir, "data", "parsed_tables")
         os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, f"{folder_name}_tables.json")
+        output_file = os.path.join(output_dir, f"{folder_name}_docling.json")
         
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(extracted_tables, f, ensure_ascii=False, indent=2)
-            
+
+        print(f"\n{'='*60}")
         print(f"Saved {len(extracted_tables)} tables to {output_file}")
+        print(f"{'='*60}")
         
     except Exception as e:
         print(f"Error processing {target_pdf}: {e}")
